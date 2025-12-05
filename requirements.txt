@@ -1,10 +1,17 @@
+# Streamlit & UI
 streamlit>=1.31
+
+# Core scientific packages
 numpy>=1.24
-pillow>=10.0
-opencv-python-headless==4.8.1.78
 pandas>=2.1
+scipy>=1.11
+matplotlib>=3.8
 scikit-image>=0.22
 numba>=0.59
-matplotlib>=3.8
-scipy>=1.11
+
+# Image handling
+pillow>=10.0
+opencv-python-headless==4.8.1.78
+
+# Zusatz: klickbare Koordinaten in Streamlit
 streamlit_image_coordinates==0.0.5
