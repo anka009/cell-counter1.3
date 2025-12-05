@@ -1,27 +1,27 @@
 """
 iterative_deconv_refactor_v3.py
 Refaktorisierte, modulare und optimierte Version der Iterativen Kern-Zählung (Streamlit)
+cv2-freie Variante: Nutzung von scikit-image + PIL statt OpenCV (kompatibel mit Python 3.13)
 - modular: Stain/OD utilities, Detection, UI
 - Performance: optional Numba acceleration, caching mit streamlit.cache_data
 - Robustheit: Logging, stabilere Pseudoinverse, klarere Session-State-API
 - UI: übersichtlichere Sidebar, Legende, Debug-Optionen
 
-Hinweis: Numba ist optional — das Skript läuft ohne Numba. Wenn installiert, werden kritische Pfade beschleunigt.
-
 Benutzung: `streamlit run iterative_deconv_refactor_v3.py`
-
 """
 
 from __future__ import annotations
 import streamlit as st
 import numpy as np
-import cv2
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import pandas as pd
 import json
 import os
 import logging
 from typing import Tuple, List, Optional, Dict
+
+# scikit-image replacements for morphology/contours/filters
+from skimage import morphology, filters, measure, util
 
 # Optional acceleration
 try:
@@ -163,7 +163,7 @@ def median_od_vector_from_patch(patch: np.ndarray, eps: float = 1e-6) -> Optiona
 
 def detect_centers_from_channel(channel: np.ndarray, threshold: float = 0.2, min_area: int = 30,
                                 kernel_size_open: int = 3, kernel_size_close: int = 3, debug: bool = False) -> Tuple[List[Tuple[int, int]], np.ndarray]:
-    """Detect centers on a single concentration channel.
+    """Detect centers on a single concentration channel using scikit-image.
     Returns list of (x,y) in original coordinates and mask image (uint8).
     """
     arr = np.array(channel, dtype=np.float32)
@@ -177,48 +177,79 @@ def detect_centers_from_channel(channel: np.ndarray, threshold: float = 0.2, min
     norm = np.clip(norm, 0.0, 1.0)
     u8 = (norm * 255.0).astype(np.uint8)
 
+    # adaptive threshold: fallback to global if necessary
     try:
-        mask = cv2.adaptiveThreshold(u8, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 35, -2)
+        block_size = 35
+        local_thresh = filters.threshold_local(u8, block_size, method='gaussian')
+        binary = u8 > local_thresh
     except Exception:
-        _, mask = cv2.threshold(u8, int(threshold * 255), 255, cv2.THRESH_BINARY)
+        thresh = filters.threshold_otsu(u8)
+        binary = u8 > thresh
 
-    kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size_open, kernel_size_open))
-    kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size_close, kernel_size_close))
+    # morphological cleaning
+    selem_open = morphology.disk(max(1, kernel_size_open))
+    selem_close = morphology.disk(max(1, kernel_size_close))
 
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close)
+    bin_clean = morphology.binary_opening(binary, selem_open)
+    bin_clean = morphology.binary_closing(bin_clean, selem_close)
 
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # remove tiny objects
+    bin_clean = morphology.remove_small_objects(bin_clean, min_size=max(1, min_area))
+
+    # label and compute regionprops
+    label_img = measure.label(bin_clean)
+    props = measure.regionprops(label_img)
+
     centers = []
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if area >= max(1, min_area):
-            M = cv2.moments(cnt)
-            if M["m00"] != 0:
-                cx = int(M["m10"] / M["m00"])
-                cy = int(M["m01"] / M["m00"])
-                centers.append((cx, cy))
+    for p in props:
+        if p.area >= max(1, min_area):
+            # centroid is (row, col)
+            cy, cx = p.centroid
+            centers.append((int(round(cx)), int(round(cy))))
+
+    mask_uint8 = (bin_clean.astype(np.uint8) * 255)
 
     if debug:
-        dbg = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+        # create an RGB debug image and draw centers
+        dbg = np.stack([mask_uint8]*3, axis=-1)
         for (cx, cy) in centers:
-            cv2.circle(dbg, (cx, cy), 5, (0, 0, 255), -1)
+            rr, cc = morphology.disk((cy, cx), 5, shape=dbg.shape[:2])
+            dbg[rr, cc, :] = np.array([255, 0, 0], dtype=np.uint8)
         return centers, dbg
 
-    return centers, mask
+    return centers, mask_uint8
+
 
 # -------------------- Streamlit UI helpers --------------------
 
+def _numpy_to_pil(img: np.ndarray) -> Image.Image:
+    return Image.fromarray(img.astype('uint8'))
+
+
+def _pil_to_numpy(im: Image.Image) -> np.ndarray:
+    return np.asarray(im)
+
+
 def draw_scale_bar(img_disp: np.ndarray, scale: float, length_orig: int = 200, bar_height: int = 10, margin: int = 20, color: Tuple[int, int, int] = (0, 0, 0)) -> np.ndarray:
-    h, w = img_disp.shape[:2]
+    # use PIL to draw rectangle and text reliably
+    pil = _numpy_to_pil(img_disp.copy())
+    draw = ImageDraw.Draw(pil)
+    w, h = pil.size
     length_disp = int(round(length_orig * scale))
     x1 = margin
     y1 = h - margin - bar_height
     x2 = min(w - margin, x1 + length_disp)
     y2 = h - margin
-    cv2.rectangle(img_disp, (x1, y1), (x2, y2), color, -1)
-    cv2.putText(img_disp, f"{length_orig} px", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
-    return img_disp
+    draw.rectangle([(x1, y1), (x2, y2)], fill=tuple(color))
+    # simple text (font default)
+    draw.text((x1, y1 - 12), f"{length_orig} px", fill=tuple(color))
+    return _pil_to_numpy(pil)
+
+
+def draw_circle_on_np(img: np.ndarray, center: Tuple[int, int], radius: int, color: Tuple[int, int, int]):
+    rr, cc = morphology.disk((center[1], center[0]), radius, shape=img.shape[:2])
+    img[rr, cc] = color
+
 
 # -------------------- Session-state utilities --------------------
 
@@ -294,8 +325,8 @@ def main():
     scale = disp_width / float(W_orig)
     H_disp = int(round(H_orig * scale))
 
-    interp = cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR
-    image_disp = cv2.resize(image_orig, (disp_width, H_disp), interpolation=interp)
+    # use PIL for resize
+    image_disp = np.array(Image.fromarray(image_orig).resize((disp_width, H_disp), resample=Image.BILINEAR))
 
     # Draw display canvas and existing groups
     display_canvas = image_disp.copy()
@@ -306,11 +337,17 @@ def main():
         for (x_orig, y_orig) in g["points"]:
             x_disp = int(round(x_orig * scale))
             y_disp = int(round(y_orig * scale))
-            cv2.circle(display_canvas, (x_disp, y_disp), circle_radius, col, -1)
+            # draw filled circle
+            rr, cc = morphology.disk((y_disp, x_disp), circle_radius, shape=display_canvas.shape[:2])
+            display_canvas[rr, cc] = col
         if g["points"]:
             px_disp = int(round(g["points"][0][0] * scale))
             py_disp = int(round(g["points"][0][1] * scale))
-            cv2.putText(display_canvas, f"G{i+1}:{len(g['points'])}", (px_disp + 6, py_disp - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1, cv2.LINE_AA)
+            # draw group label using PIL
+            pil = _numpy_to_pil(display_canvas)
+            draw = ImageDraw.Draw(pil)
+            draw.text((px_disp + 6, py_disp - 6), f"G{i+1}:{len(g['points'])}", fill=tuple(col))
+            display_canvas = _pil_to_numpy(pil)
 
     # Image click handling using streamlit_image_coordinates if available, otherwise simple clickable fallback
     try:
