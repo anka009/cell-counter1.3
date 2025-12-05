@@ -8,3 +8,13 @@ opencv-python-headless
 streamlit-drawable-canvas
 scikit-learn
 scikit-image
+streamlit>=1.31
+numpy>=1.24
+pillow>=10.0
+opencv-python-headless==4.8.1.78
+pandas>=2.1
+scikit-image>=0.22
+numba>=0.59
+matplotlib>=3.8
+scipy>=1.11
+streamlit_image_coordinates==0.0.5
