@@ -1,4 +1,4 @@
-# canvas_iterative_deconv_v2.py
+# canvas_iterative_deconv_v2.py — TÜV-Version
 import streamlit as st
 import numpy as np
 import cv2
@@ -17,13 +17,23 @@ defaults = {
     "C_cache": None,
     "last_M_hash": None,
     "history": [],
-    "last_file": None
+    "last_file": None,
+    "disp_width": 1200,
+    "kalibrier_radius": 10,
+    "min_konturflaeche": 1000,
+    "dedup_distanz": 50,
+    "kernel_size_open": 3,
+    "kernel_size_close": 3,
+    "marker_radius": 5,
+    "hema_vec": "0.65,0.70,0.29",
+    "aec_vec": "0.27,0.57,0.78"
 }
+
 for key, val in defaults.items():
     if key not in st.session_state:
         st.session_state[key] = val
 
-st.set_page_config(page_title="Iterative Kern-Zählung (OD + Deconv) — v2", layout="wide")
+st.set_page_config(page_title="Iterative Kern-Zählung (OD + Deconv) — TÜV", layout="wide")
 
 # -------------------- Hilfsfunktionen --------------------
 def draw_scale_bar(img_disp, scale, length_orig=200, bar_height=10, margin=20, color=(0,0,0)):
@@ -102,8 +112,7 @@ def detect_centers_from_channel_v2(channel, threshold=0.2, min_area=30, debug=Fa
     vmin, vmax = np.percentile(arr, [2, 99.5])
     if vmax - vmin < 1e-5:
         return [], np.zeros_like(arr, dtype=np.uint8)
-    norm = (arr - vmin) / (vmax - vmin)
-    norm = np.clip(norm, 0.0, 1.0)
+    norm = np.clip((arr - vmin) / (vmax - vmin), 0.0, 1.0)
     u8 = (norm * 255.0).astype(np.uint8)
     try:
         mask = cv2.adaptiveThreshold(u8, 255,
@@ -112,12 +121,10 @@ def detect_centers_from_channel_v2(channel, threshold=0.2, min_area=30, debug=Fa
                                      35, -2)
     except Exception:
         _, mask = cv2.threshold(u8, int(threshold * 255), 255, cv2.THRESH_BINARY)
-
-    kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size_open, kernel_size_open))
-    kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size_close, kernel_size_close))
+    kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (st.session_state.kernel_size_open, st.session_state.kernel_size_open))
+    kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (st.session_state.kernel_size_close, st.session_state.kernel_size_close))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close)
-
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     centers = []
     for cnt in contours:
@@ -131,117 +138,15 @@ def detect_centers_from_channel_v2(channel, threshold=0.2, min_area=30, debug=Fa
     if debug:
         dbg = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
         for (cx, cy) in centers:
-            cv2.circle(dbg, (cx, cy), 5, (0, 0, 255), -1)
+            cv2.circle(dbg, (cx, cy), 5, (0,0,255), -1)
         return centers, dbg
     return centers, mask
 
-# -------------------- Session state defaults --------------------
-for k in ["groups", "all_points", "last_file", "disp_width", "C_cache", "last_M_hash", "history"]:
-    if k not in st.session_state:
-        if k in ["groups", "all_points", "history"]:
-            st.session_state[k] = []
-        elif k == "disp_width":
-            st.session_state[k] = 1200
-        else:
-            st.session_state[k] = None
-
-# -------------------- Sidebar: Parametersets --------------------
-PARAM_FILE = "params.json"
-default_sets = {
-    "default": {
-        "kalibrier_radius": 10,
-        "min_konturflaeche": 1000,
-        "dedup_distanz": 50,
-        "kernel_size_open": 3,
-        "kernel_size_close": 3,
-        "marker_radius": 5,
-        "hema_vec": "0.65,0.70,0.29",
-        "aec_vec": "0.27,0.57,0.78"
-    },
-    "Set 1": {
-        "kalibrier_radius": 5,
-        "min_konturflaeche": 2000,
-        "dedup_distanz": 75,
-        "kernel_size_open": 2,
-        "kernel_size_close": 2,
-        "marker_radius": 4,
-        "hema_vec": "0.65,0.70,0.29",
-        "aec_vec": "0.27,0.57,0.78"
-    }
-}
-if os.path.exists(PARAM_FILE):
-    with open(PARAM_FILE, "r") as f:
-        parameter_sets = json.load(f)
-else:
-    parameter_sets = default_sets
-    with open(PARAM_FILE, "w") as f:
-        json.dump(parameter_sets, f)
-
-choice = st.sidebar.selectbox(
-    "Wähle Parameterset",
-    list(parameter_sets.keys()),
-    index=list(parameter_sets.keys()).index("default")
-)
-params = parameter_sets[choice]
-for key, val in params.items():
-    st.session_state[key] = val
-
-# Sidebar sliders/inputs
-calib_radius     = st.sidebar.slider("Kalibrier-Radius", 1, 30, int(float(st.session_state["kalibrier_radius"])))
-min_area_orig    = st.sidebar.number_input("Minimale Konturfläche", 1, 10000, int(float(st.session_state["min_konturflaeche"])))
-dedup_dist_orig  = st.sidebar.number_input("Dedup-Distanz", 1, 1000, int(float(st.session_state["dedup_distanz"])))
-kernel_size_open = st.sidebar.slider("Kernelgröße Öffnen", 1, 15, int(float(st.session_state["kernel_size_open"])))
-kernel_size_close= st.sidebar.slider("Kernelgröße Schließen", 1, 15, int(float(st.session_state["kernel_size_close"])))
-circle_radius    = st.sidebar.slider("Marker-Radius", 1, 12, int(float(st.session_state["marker_radius"])))
-hema_vec         = st.sidebar.text_input("Hematoxylin vector (R,G,B)", value=st.session_state["hema_vec"])
-aec_vec          = st.sidebar.text_input("Chromogen vector (R,G,B)", value=st.session_state["aec_vec"])
-
-st.session_state.update({
-    "kalibrier_radius": calib_radius,
-    "min_konturflaeche": min_area_orig,
-    "dedup_distanz": dedup_dist_orig,
-    "kernel_size_open": kernel_size_open,
-    "kernel_size_close": kernel_size_close,
-    "marker_radius": circle_radius,
-    "hema_vec": hema_vec,
-    "aec_vec": aec_vec
-})
-
-# Save new set
-new_name = st.sidebar.text_input("Neuer Name für Parameterset")
-if st.sidebar.button("Speichern"):
-    if new_name.strip() == "":
-        st.sidebar.error("Bitte einen gültigen Namen eingeben!")
-    else:
-        parameter_sets[new_name] = {
-            "kalibrier_radius": calib_radius,
-            "min_konturflaeche": min_area_orig,
-            "dedup_distanz": dedup_dist_orig,
-            "kernel_size_open": kernel_size_open,
-            "kernel_size_close": kernel_size_close,
-            "marker_radius": circle_radius,
-            "hema_vec": hema_vec,
-            "aec_vec": aec_vec
-        }
-        with open(PARAM_FILE, "w") as f:
-            json.dump(parameter_sets, f)
-        st.sidebar.success(f"Parameterset '{new_name}' gespeichert!")
-
-# Delete set
-if st.sidebar.button(f"Lösche Set '{choice}'"):
-    if choice == "default":
-        st.sidebar.error("Das 'default'-Set kann nicht gelöscht werden.")
-    else:
-        del parameter_sets[choice]
-        with open(PARAM_FILE, "w") as f:
-            json.dump(parameter_sets, f)
-        st.sidebar.success(f"Parameterset '{choice}' gelöscht!")
-
-# -------------------- Bild-Upload & Vorbereitung --------------------
-st.sidebar.markdown("### Bild hochladen")
-uploaded_file = st.sidebar.file_uploader("Wähle ein Bild (jpg/png/tif)", type=["jpg", "png", "tif", "tiff"])
+# -------------------- Bild-Upload --------------------
+st.sidebar.markdown("<h5 style='color:darkred'>🧬 Iterative Kern-Zählung TÜV</h5>", unsafe_allow_html=True)
+uploaded_file = st.sidebar.file_uploader("Wähle Bild (jpg/png/tif)", type=["jpg","png","tif","tiff"])
 if not uploaded_file:
-    st.info("Bitte zuerst ein Bild hochladen.")
+    st.info("Bitte Bild hochladen.")
     st.stop()
 
 if uploaded_file.name != st.session_state.last_file:
@@ -252,29 +157,34 @@ if uploaded_file.name != st.session_state.last_file:
     st.session_state.history = []
     st.session_state.last_file = uploaded_file.name
 
-DISPLAY_WIDTH = st.slider("Anzeige-Breite (px)", 300, 1600, st.session_state.disp_width)
-st.session_state.disp_width = DISPLAY_WIDTH
+# -------------------- Expander für Parameter --------------------
+with st.sidebar.expander("Parameter"):
+    st.session_state.kalibrier_radius = st.slider("Kalibrier-Radius", 1, 30, st.session_state.kalibrier_radius)
+    st.session_state.min_konturflaeche = st.number_input("Minimale Konturfläche", 1, 10000, st.session_state.min_konturflaeche)
+    st.session_state.dedup_distanz = st.number_input("Dedup-Distanz", 1, 1000, st.session_state.dedup_distanz)
+    st.session_state.kernel_size_open = st.slider("Kernelgröße Öffnen", 1, 15, st.session_state.kernel_size_open)
+    st.session_state.kernel_size_close = st.slider("Kernelgröße Schließen", 1, 15, st.session_state.kernel_size_close)
+    st.session_state.marker_radius = st.slider("Marker-Radius", 1, 12, st.session_state.marker_radius)
+    st.session_state.hema_vec = st.text_input("Hematoxylin vector (R,G,B)", st.session_state.hema_vec)
+    st.session_state.aec_vec = st.text_input("Chromogen vector (R,G,B)", st.session_state.aec_vec)
 
+# -------------------- Prepare images --------------------
 image_orig = np.array(Image.open(uploaded_file).convert("RGB"))
 H_orig, W_orig = image_orig.shape[:2]
-scale = DISPLAY_WIDTH / float(W_orig)
+scale = st.session_state.disp_width / float(W_orig)
 H_disp = int(round(H_orig * scale))
-image_disp = cv2.resize(image_orig, (DISPLAY_WIDTH, H_disp), interpolation=cv2.INTER_AREA)
+image_disp = cv2.resize(image_orig, (st.session_state.disp_width, H_disp), interpolation=cv2.INTER_AREA)
 
-# -------------------- Anzeige Canvas --------------------
+# -------------------- Draw existing points --------------------
 display_canvas = image_disp.copy()
 display_canvas = draw_scale_bar(display_canvas, scale, length_orig=200, bar_height=3, color=(0,0,0))
-
-PRESET_COLORS = [
-    (220, 20, 60), (0, 128, 0), (30, 144, 255),
-    (255, 165, 0), (148, 0, 211), (0, 255, 255)
-]
+PRESET_COLORS = [(220,20,60),(0,128,0),(30,144,255),(255,165,0),(148,0,211),(0,255,255)]
 for i, g in enumerate(st.session_state.groups):
     col = tuple(int(x) for x in g.get("color", PRESET_COLORS[i % len(PRESET_COLORS)]))
     for (x_orig, y_orig) in g["points"]:
         x_disp = int(round(x_orig * scale))
         y_disp = int(round(y_orig * scale))
-        cv2.circle(display_canvas, (x_disp, y_disp), circle_radius, col, -1)
+        cv2.circle(display_canvas, (x_disp, y_disp), st.session_state.marker_radius, col, -1)
     if g["points"]:
         px_disp = int(round(g["points"][0][0] * scale))
         py_disp = int(round(g["points"][0][1] * scale))
@@ -283,32 +193,26 @@ for i, g in enumerate(st.session_state.groups):
 
 coords = streamlit_image_coordinates(Image.fromarray(display_canvas),
                                     key=f"clickable_image_v2_{st.session_state.last_file}",
-                                    width=DISPLAY_WIDTH)
+                                    width=st.session_state.disp_width)
 
-# -------------------- Sidebar actions --------------------
-mode = st.sidebar.radio("Aktion", ["Kalibriere und zähle Gruppe (Klick)", "Punkt löschen", "Undo letzte Aktion"])
-st.sidebar.markdown("---")
+# -------------------- Sidebar Aktionen --------------------
+mode = st.sidebar.radio("Aktion", ["Kalibriere und zähle Gruppe (Klick)","Punkt löschen","Undo letzte Aktion"])
 if st.sidebar.button("Reset (Alle Gruppen)"):
-    st.session_state.history.append(("reset", {
-        "groups": st.session_state.groups.copy(),
-        "all_points": st.session_state.all_points.copy()
-    }))
+    st.session_state.history.append(("reset", {"groups": st.session_state.groups.copy(),"all_points": st.session_state.all_points.copy()}))
     st.session_state.groups = []
     st.session_state.all_points = []
     st.session_state.C_cache = None
     st.success("Zurückgesetzt.")
 
-# -------------------- Click handling --------------------
+# -------------------- Click Handling --------------------
 if coords:
     x_disp, y_disp = int(coords["x"]), int(coords["y"])
-    x_orig = int(round(x_disp / scale))
-    y_orig = int(round(y_disp / scale))
+    x_orig, y_orig = int(round(x_disp / scale)), int(round(y_disp / scale))
 
     if mode == "Punkt löschen":
-        removed = []
-        new_all = []
+        removed, new_all = [], []
         for p in st.session_state.all_points:
-            if is_near(p, (x_orig, y_orig), dedup_dist_orig):
+            if is_near(p, (x_orig, y_orig), st.session_state.dedup_distanz):
                 removed.append(p)
             else:
                 new_all.append(p)
@@ -316,48 +220,41 @@ if coords:
             st.session_state.history.append(("delete_points", {"removed": removed}))
             st.session_state.all_points = new_all
             for g in st.session_state.groups:
-                g["points"] = [p for p in g["points"] if not is_near(p, (x_orig, y_orig), dedup_dist_orig)]
+                g["points"] = [p for p in g["points"] if not is_near(p, (x_orig, y_orig), st.session_state.dedup_distanz)]
             st.success(f"{len(removed)} Punkt(e) gelöscht.")
         else:
             st.info("Kein Punkt in der Nähe gefunden.")
-
     elif mode == "Undo letzte Aktion":
         if st.session_state.history:
             action, payload = st.session_state.history.pop()
-            if action == "add_group":
+            if action=="add_group":
                 idx = payload["group_idx"]
                 if 0 <= idx < len(st.session_state.groups):
                     grp = st.session_state.groups.pop(idx)
                     for pt in grp["points"]:
                         st.session_state.all_points = [p for p in st.session_state.all_points if p != pt]
                 st.success("Letzte Gruppen-Aktion rückgängig gemacht.")
-            elif action == "delete_points":
+            elif action=="delete_points":
                 removed = payload["removed"]
                 st.session_state.all_points.extend(removed)
-                st.session_state.groups.append({
-                    "vec": None,
-                    "points": removed,
-                    "color": PRESET_COLORS[len(st.session_state.groups) % len(PRESET_COLORS)]
-                })
+                st.session_state.groups.append({"vec": None,"points": removed,"color": PRESET_COLORS[len(st.session_state.groups)%len(PRESET_COLORS)]})
                 st.success("Gelöschte Punkte wiederhergestellt (als neue Gruppe).")
-            elif action == "reset":
+            elif action=="reset":
                 st.session_state.groups = payload["groups"]
                 st.session_state.all_points = payload["all_points"]
                 st.success("Reset rückgängig gemacht.")
-            else:
-                st.warning("Undo: unbekannte Aktion.")
         else:
             st.info("Keine Aktion zum Rückgängig machen.")
-
     else:
-        patch = extract_patch(image_orig, x_orig, y_orig, calib_radius)
+        patch = extract_patch(image_orig, x_orig, y_orig, st.session_state.kalibrier_radius)
         vec = median_od_vector_from_patch(patch)
         if vec is None:
-            st.warning("Patch unbrauchbar. Bitte anders klicken.")
+            st.warning("Patch unbrauchbar (zu homogen oder außerhalb).")
         else:
-            M = make_stain_matrix(vec, np.array([float(x) for x in hema_vec.split(",")], dtype=float))
+            hema_vec0 = np.array([float(x.strip()) for x in st.session_state.hema_vec.split(",")],dtype=float)
+            M = make_stain_matrix(vec, hema_vec0)
             M_hash = tuple(np.round(M.flatten(), 6).tolist())
-            recompute = st.session_state.C_cache is None or st.session_state.last_M_hash != M_hash
+            recompute = (st.session_state.C_cache is None) or (st.session_state.last_M_hash != M_hash)
             if recompute:
                 C_full = deconvolve(image_orig, M)
                 if C_full is None:
@@ -367,36 +264,40 @@ if coords:
                 st.session_state.last_M_hash = M_hash
             else:
                 C_full = st.session_state.C_cache
-            channel_full = C_full[:, :, 0]
-            centers_orig, mask = detect_centers_from_channel_v2(channel_full,
-                                                                threshold=0.2,
-                                                                min_area=min_area_orig,
-                                                                debug=False)
-            new_centers = dedup_new_points(centers_orig, st.session_state.all_points, min_dist=dedup_dist_orig)
-            if not any(is_near(p, (x_orig, y_orig), dedup_dist_orig) for p in st.session_state.all_points):
+            channel_full = C_full[:,:,0]
+            centers_orig, mask = detect_centers_from_channel_v2(channel_full, min_area=st.session_state.min_konturflaeche)
+            new_centers = dedup_new_points(centers_orig, st.session_state.all_points, st.session_state.dedup_distanz)
+            if not any(is_near(p, (x_orig, y_orig), st.session_state.dedup_distanz) for p in st.session_state.all_points):
                 new_centers.append((x_orig, y_orig))
             if new_centers:
-                grp_color = PRESET_COLORS[len(st.session_state.groups) % len(PRESET_COLORS)]
-                st.session_state.groups.append({
-                    "vec": vec,
-                    "points": new_centers,
-                    "color": grp_color
-                })
+                color = PRESET_COLORS[len(st.session_state.groups) % len(PRESET_COLORS)]
+                group = {"vec": vec.tolist(), "points": new_centers, "color": color}
+                st.session_state.history.append(("add_group", {"group_idx": len(st.session_state.groups)}))
+                st.session_state.groups.append(group)
                 st.session_state.all_points.extend(new_centers)
-                st.session_state.history.append(("add_group", {"group_idx": len(st.session_state.groups)-1}))
-                st.success(f"{len(new_centers)} Punkt(e) zur Gruppe hinzugefügt.")
-            else:
-                st.info("Keine neuen Punkte erkannt.")
+                st.success(f"Gruppe hinzugefügt — neue Kerne: {len(new_centers)}")
+
+# -------------------- Ergebnisse --------------------
+st.markdown("## Ergebnisse")
+img_result = image_disp.copy()
+for i,g in enumerate(st.session_state.groups):
+    col = tuple(int(x) for x in g.get("color",(255,0,0)))
+    for (x,y) in g["points"]:
+        x_disp = int(round(x*scale))
+        y_disp = int(round(y*scale))
+        cv2.circle(img_result,(x_disp,y_disp),st.session_state.marker_radius,col,-1)
+st.image(img_result, caption="Gezählte Punkte", use_column_width=True)
+
+total_points = sum(len(g["points"]) for g in st.session_state.groups)
+st.write(f"**Gesamtpunkte:** {total_points}")
+for i, g in enumerate(st.session_state.groups):
+    st.write(f"- Gruppe {i+1}: {len(g['points'])} Punkte")
 
 # -------------------- CSV Export --------------------
-if st.sidebar.button("CSV Export"):
-    all_pts = []
-    for i, g in enumerate(st.session_state.groups):
-        for pt in g["points"]:
-            all_pts.append({"Gruppe": i+1, "x": pt[0], "y": pt[1]})
-    if all_pts:
-        df = pd.DataFrame(all_pts)
-        csv_data = df.to_csv(index=False).encode("utf-8")
-        st.sidebar.download_button("CSV herunterladen", data=csv_data, file_name="punkte.csv", mime="text/csv")
-    else:
-        st.sidebar.info("Keine Punkte zum Export vorhanden.")
+if st.session_state.all_points:
+    rows=[]
+    for i,g in enumerate(st.session_state.groups):
+        for (x_orig, y_orig) in g["points"]:
+            rows.append({"Group":i+1,"X_original":int(x_orig),"Y_original":int(y_orig)})
+    df=pd.DataFrame(rows)
+    st.download_button("📥 CSV exportieren", df.to_csv(index=False).encode("utf-8"),file_name="kern_gruppen.csv",mime="text/csv")
