@@ -59,12 +59,17 @@ def is_near(p1, p2, r=6):
     return np.linalg.norm(np.array(p1) - np.array(p2)) < r
 
 def dedup_new_points(candidates, existing, min_dist=6):
-    """Return candidates that are not within min_dist of any existing point.
-    points are (x,y) tuples in the same coordinate system (original image)."""
+    if not existing:
+        return candidates
+    cand_arr = np.array(candidates)
+    exist_arr = np.array(existing)
+
     out = []
-    for c in candidates:
-        if not any(is_near(c, e, min_dist) for e in existing):
-            out.append(c)
+    for c in cand_arr:
+        # Vektorisiert: alle Distanzen auf einmal berechnen
+        dists = np.linalg.norm(exist_arr - c, axis=1)
+        if np.all(dists >= min_dist):
+            out.append(tuple(c))
     return out
 
 def extract_patch(img, x, y, radius=5):
